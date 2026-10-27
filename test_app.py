@@ -6,6 +6,9 @@ from app_final import app
 
 client = TestClient(app)
 
+STUDENT = "Иванов Иван"
+OTHER_STUDENT = "Петров Петр"
+BASE = f"/students/{STUDENT}"
 COURSE = "Дискретные и непрерывные структуры"
 EXAM = {"name": "Экзамен", "points": 4, "count": 1}
 HW = {"name": "ДЗ", "points": 4, "count": 2}
@@ -14,30 +17,29 @@ BONUS = {"name": "Допбалл", "points": 1, "count": 1}
 
 
 def clear_memory():
-    app_final.courses.clear()
-    app_final.tasks.clear()
-    app_final.duties.clear()
+    app_final.students.clear()
 
 
 @pytest.fixture(autouse=True)
 def clean_state(tmp_path, monkeypatch):
     monkeypatch.setattr(app_final, "DATA_FILE", str(tmp_path / "data.json"))
     clear_memory()
+    client.post("/students", json={"name": STUDENT})
 
 
 def create_course(*components):
-    return client.post("/courses", json={"name": COURSE, "components": list(components)})
+    return client.post(f"{BASE}/courses", json={"name": COURSE, "components": list(components)})
 
 
 def add_task(component="ДЗ", title="ДЗ 1"):
     return client.post(
-        f"/courses/{COURSE}/tasks",
+        f"{BASE}/courses/{COURSE}/tasks",
         json={"component": component, "title": title, "due": "2026-10-29"}
         )
 
 
 def done(task_id, score):
-    return client.post(f"/courses/{COURSE}/tasks/{task_id}/done", params={"score": score})
+    return client.post(f"{BASE}/courses/{COURSE}/tasks/{task_id}/done", params={"score": score})
 
 
 def test_health():
@@ -69,7 +71,7 @@ def test_close_component_recalculates_weight():
     create_course(QUIZ)
     add_task("Контрольные", "КР 1")
     assert done(1, 10).json()["accumulated"] == 1
-    response = client.post(f"/courses/{COURSE}/close", params={"component": "Контрольные"})
+    response = client.post(f"{BASE}/courses/{COURSE}/close", params={"component": "Контрольные"})
     assert response.json()["accumulated"] == 2
 
 
@@ -104,28 +106,43 @@ def test_score_out_of_range():
 
 
 def test_unknown_course():
-    assert client.get("/courses/нет").status_code == 404
+    assert client.get(f"{BASE}/courses/нет").status_code == 404
 
 
 def test_admin_duty():
-    client.post("/admin", json={"title": "Пройти оценку преподавания", "due": "2026-12-25"})
-    client.post("/admin/1/done")
-    assert client.get("/admin").json()[0]["done"] is True
+    client.post(f"{BASE}/admin", json={"title": "Пройти оценку преподавания", "due": "2026-12-25"})
+    client.post(f"{BASE}/admin/1/done")
+    assert client.get(f"{BASE}/admin").json()[0]["done"] is True
+
+
+def test_students_are_isolated():
+    client.post("/students", json={"name": OTHER_STUDENT})
+    create_course(EXAM)
+    assert client.get(f"/students/{OTHER_STUDENT}/courses").json() == []
+    other = client.post(f"/students/{OTHER_STUDENT}/courses", json={"name": COURSE, "components": [EXAM]})
+    assert other.status_code == 201
+
+
+def test_duplicate_and_unknown_student():
+    assert client.post("/students", json={"name": STUDENT}).status_code == 409
+    assert client.get("/students/нет/courses").status_code == 404
 
 
 def test_data_survives_restart():
     create_course(EXAM)
     add_task("Экзамен", "Экзамен")
     done(1, 10)
-    client.post("/admin", json={"title": "Пройти оценку преподавания", "due": "2026-12-25"})
+    client.post(f"{BASE}/admin", json={"title": "Пройти оценку преподавания", "due": "2026-12-25"})
     clear_memory()
     app_final.load()
-    assert client.get(f"/courses/{COURSE}").json()["accumulated"] == 4
-    assert client.get("/admin").json()[0]["title"] == "Пройти оценку преподавания"
+    assert client.get("/students").json() == [STUDENT]
+    assert client.get(f"{BASE}/courses/{COURSE}").json()["accumulated"] == 4
+    assert client.get(f"{BASE}/admin").json()[0]["title"] == "Пройти оценку преподавания"
 
 
 @pytest.mark.parametrize("content", ["", "{}"])
 def test_empty_data_file_starts_empty(tmp_path, content):
     (tmp_path / "data.json").write_text(content)
+    clear_memory()
     app_final.load()
-    assert client.get("/courses").json() == []
+    assert client.get("/students").json() == []
