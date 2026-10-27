@@ -13,11 +13,16 @@ QUIZ = {"name": "Контрольные", "points": 2, "count": 2}
 BONUS = {"name": "Допбалл", "points": 1, "count": 1}
 
 
-@pytest.fixture(autouse=True)
-def clean_state():
+def clear_memory():
     app_final.courses.clear()
     app_final.tasks.clear()
     app_final.duties.clear()
+
+
+@pytest.fixture(autouse=True)
+def clean_state(tmp_path, monkeypatch):
+    monkeypatch.setattr(app_final, "DATA_FILE", str(tmp_path / "data.json"))
+    clear_memory()
 
 
 def create_course(*components):
@@ -106,3 +111,21 @@ def test_admin_duty():
     client.post("/admin", json={"title": "Пройти оценку преподавания", "due": "2026-12-25"})
     client.post("/admin/1/done")
     assert client.get("/admin").json()[0]["done"] is True
+
+
+def test_data_survives_restart():
+    create_course(EXAM)
+    add_task("Экзамен", "Экзамен")
+    done(1, 10)
+    client.post("/admin", json={"title": "Пройти оценку преподавания", "due": "2026-12-25"})
+    clear_memory()
+    app_final.load()
+    assert client.get(f"/courses/{COURSE}").json()["accumulated"] == 4
+    assert client.get("/admin").json()[0]["title"] == "Пройти оценку преподавания"
+
+
+@pytest.mark.parametrize("content", ["", "{}"])
+def test_empty_data_file_starts_empty(tmp_path, content):
+    (tmp_path / "data.json").write_text(content)
+    app_final.load()
+    assert client.get("/courses").json() == []

@@ -1,6 +1,8 @@
+import json
 import logging
 import os
 from datetime import date
+from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -9,6 +11,7 @@ VERSION = "0.1.0"
 MAX_GRADE = 10
 PROGRAM_NAME = os.getenv("PROGRAM_NAME", "Программа обучения")
 STUDENT_NAME = os.getenv("STUDENT_NAME", "Иванов Иван Иванович")
+DATA_FILE = os.getenv("DATA_FILE", "data.json")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("tracker")
@@ -54,6 +57,31 @@ class Duty(NewDuty):
 courses: dict[str, Course] = {}
 tasks: dict[str, list[Task]] = {}
 duties: list[Duty] = []
+
+
+def save():
+    data = {
+        "courses": {name: course.model_dump(mode="json") for name, course in courses.items()},
+        "tasks": {name: [t.model_dump(mode="json") for t in items] for name, items in tasks.items()},
+        "duties": [d.model_dump(mode="json") for d in duties]
+        }
+    Path(DATA_FILE).write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def load():
+    path = Path(DATA_FILE)
+    text = path.read_text(encoding="utf-8").strip() if path.exists() else ""
+    if not text:
+        logger.info("Файл данных %s не найден или пуст, начинаем с пустых данных", DATA_FILE)
+        return
+    data = json.loads(text)
+    courses.update({name: Course(**course) for name, course in data.get("courses", {}).items()})
+    tasks.update({name: [Task(**t) for t in items] for name, items in data.get("tasks", {}).items()})
+    duties.extend(Duty(**d) for d in data.get("duties", []))
+    logger.info("Данные загружены из %s: курсов %d, обязанностей %d", DATA_FILE, len(courses), len(duties))
+
+
+load()
 
 
 def find_course(name: str) -> Course:
@@ -113,6 +141,7 @@ def create_course(course: Course):
         raise HTTPException(422, "Названия компонентов должны быть уникальны")
     courses[course.name] = course
     tasks[course.name] = []
+    save()
     logger.info("Создан курс %s, компонентов: %d", course.name, len(course.components))
     return progress(course)
 
@@ -133,6 +162,7 @@ def add_task(name: str, new: NewTask):
     find_component(course, new.component)
     task = Task(id=len(tasks[name]) + 1, **new.model_dump())
     tasks[name].append(task)
+    save()
     logger.info("Курс %s: добавлено задание %s (%s) до %s", name, task.title, task.component, task.due)
     return progress(course)
 
@@ -144,6 +174,7 @@ def finish_task(name: str, task_id: int, score: float = Query(ge=0, le=MAX_GRADE
     if task is None:
         raise HTTPException(404, "Задание не найдено")
     task.score = score
+    save()
     result = progress(course)
     logger.info("Курс %s: задание %s выполнено на %s, накоп %s", name, task.title, score, result["accumulated"])
     return result
@@ -153,6 +184,7 @@ def finish_task(name: str, task_id: int, score: float = Query(ge=0, le=MAX_GRADE
 def close_component(name: str, component: str):
     course = find_course(name)
     find_component(course, component).closed = True
+    save()
     logger.info("Курс %s: компонент %s закрыт, новых заданий не будет", name, component)
     return progress(course)
 
@@ -161,6 +193,7 @@ def close_component(name: str, component: str):
 def add_duty(new: NewDuty):
     duty = Duty(id=len(duties) + 1, **new.model_dump())
     duties.append(duty)
+    save()
     logger.info("Добавлена обязанность %s до %s", duty.title, duty.due)
     return duty
 
@@ -176,5 +209,6 @@ def finish_duty(duty_id: int):
     if duty is None:
         raise HTTPException(404, "Обязанность не найдена")
     duty.done = True
+    save()
     logger.info("Обязанность %s выполнена", duty.title)
     return duty
